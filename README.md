@@ -1,6 +1,6 @@
 # Gemini Unity Bridge
 
-Двусторонний мост связи между Gemini CLI и редактором Unity. Этот плагин позволяет ИИ анализировать сцену, управлять объектами и выполнять команды в реальном времени.
+Двусторонний мост связи между Gemini CLI и редактором Unity. Этот плагин превращает Unity в интерактивную среду, которой ИИ может управлять программно: анализировать сцену, манипулировать объектами, писать код и диагностировать ошибки в реальном времени.
 
 ## 🚀 Как запустить
 
@@ -10,13 +10,14 @@
 
 ## 🛠 Как использовать (для пользователя)
 
-Вы можете отправлять запросы к серверу через любой HTTP-клиент (браузер, curl, PowerShell).
+Вы можете отправлять запросы к серверу через любой HTTP-клиент (браузер, curl, PowerShell) или использовать встроенные функции Gemini CLI.
 
 ### Примеры команд:
 
-- **Проверка связи**:
+- **Проверка связи и ошибок**:
   ```bash
   curl "http://localhost:12121/ping"
+  curl "http://localhost:12121/check_errors"
   ```
 - **Создать источник света и настроить его**:
   ```bash
@@ -24,64 +25,53 @@
   curl "http://localhost:12121/create?type=light"
   # Настраиваем интенсивность (допустим ID=100)
   curl "http://localhost:12121/component?id=100&action=set&type=Light&name=intensity&value=2.5"
-  # Меняем цвет (в формате HTML или R,G,B)
-  curl "http://localhost:12121/component?id=100&action=set&type=Light&name=color&value=#FF0000"
   ```
-- **Дублировать объект и сфокусировать камеру**:
+- **Управление трансформом**:
   ```bash
-  curl "http://localhost:12121/scene?action=duplicate&id=12345"
-  curl "http://localhost:12121/scene?action=focus&id=67890"
-  ```
-- **Работа с ассетами**:
-  ```bash
-  # Создать материал
-  curl "http://localhost:12121/asset?action=create_material&path=Assets/Red.mat&shader=Standard"
-  # Применить его к объекту
-  curl "http://localhost:12121/asset?action=apply_material&id=12345&path=Assets/Red.mat"
+  # Повернуть объект к точке
+  curl "http://localhost:12121/transform?id=123&action=look_at&target=0,5,0"
+  # Сбросить позицию
+  curl "http://localhost:12121/transform?id=123&action=reset"
   ```
 
-## 🤖 Как это помогает мне (Gemini)
+## 🤖 Возможности для ИИ (Gemini)
 
-Когда вы просите меня о помощи, я могу использовать этот мост для:
-1. **Визуальной диагностики**: Я «вижу» вашу сцену через иерархию и скриншоты.
-2. **Автоматической настройки**: Я могу сам расставить объекты, добавить компоненты или настроить их параметры через рефлексию.
-3. **Управления редактором**: Я могу сохранять сцены, переключаться между ними и фокусировать ваш взгляд на важных деталях.
-4. **Анализа ошибок**: Я читаю логи консоли напрямую, что позволяет мне быстрее находить причины багов.
+1. **Визуальная диагностика**: Захват скриншотов (`/screenshot_base64`) для анализа визуальных багов или верстки UI.
+2. **Пространственный анализ**: Выполнение Raycast (`/physics/raycast`) для понимания геометрии сцены.
+3. **Генерация кода**: Чтение и запись скриптов (`/filesystem`) с автоматическим импортом в Unity.
+4. **Манипуляция Inspector**: Доступ ко всем полям компонентов через `SerializedObject`, включая скрытые и приватные.
+5. **Пакетные операции**: Выполнение цепочки действий за один HTTP-запрос через `/batch`.
 
 ## 📝 Список API эндпоинтов (Порт 12121)
 
 | Эндпоинт | Параметры | Описание |
 | :--- | :--- | :--- |
-| `/ping` | Нет | Проверка состояния (v1.5.0). |
-| `/hierarchy` | `full` | Дерево объектов. `full=true` включает полные данные компонентов. |
-| `/inspector` | `id` | Все данные объекта и значения полей через `SerializedObject`. |
-| `/modify` | `id, action, value` | Actions: `rename`, `active`, `set_pos`, `set_layer`, `set_tag`. |
-| `/create` | `type` | Создание: `cube`, `sphere`, `capsule`, `cylinder`, `plane`, `light`, `camera`, `ui_canvas`. |
-| `/component` | `id, action, type, name, value` | `add`, `remove`, `set`, `get`, `invoke`. Поддерживает JSON-тело для `value`. |
+| `/ping` | Нет | Состояние сервера, версия и имя проекта. |
+| `/check_errors` | Нет | Возвращает `true`, если в проекте есть ошибки компиляции. |
+| `/hierarchy` | `full` | Дерево объектов сцены. `full=true` для данных компонентов. |
+| `/inspector` | `id` | Детальный обзор всех компонентов и полей объекта. |
+| `/physics/raycast`| `origin, direction, distance` | Результат луча на сцене (объект, точка, нормаль). |
+| `/screenshot_base64`| Нет | Захват изображения Scene View в формате base64. |
+| `/filesystem/read`| `path` | Чтение содержимого файла (скрипты, json, ассеты). |
+| `/filesystem/create_script`| `path, content` | Создание/обновление C# скрипта с авто-импортом. |
+| `/modify` | `id, action, value` | Базовые правки: `rename`, `active`, `set_pos`, `layer`, `tag`. |
+| `/create` | `type` | Создание примитивов, света, камеры или UI Canvas. |
+| `/component` | `id, action, type, name, value, method, args` | `add`, `remove`, `set`, `get`, `invoke` (вызов методов). |
+| `/transform` | `id, action, target` | `look_at` (к ID или Vector3), `align_with_view`, `reset`. |
 | `/scene` | `action, id, path, parent` | `new`, `save`, `open`, `focus`, `duplicate`, `set_parent`. |
-| `/asset` | `action, path, id, shader, name, from, to` | `create_material`, `apply_material`, `rename`, `move`, `delete`, `import`, `find_by_type`. |
-| `/asset_info` | `path` | Детальная информация об ассете: GUID, зависимости, размер файла. |
-| `/selection` | `action, ids` | `get`, `set` (через запятую или JSON-массив), `clear`. |
-| `/transform` | `id, action, target` | `look_at`, `align_with_view`, `reset`. |
-| `/delete` | `id` | Удаление объекта с поддержкой Undo. |
-| `/call` | `type, method` | Вызов статического метода. |
-| `/diagnostics`| Нет | Поиск объектов с отсутствующими скриптами. |
-| `/assets` | `filter` | Поиск ассетов в проекте. |
-| `/logs` | `count` | Получение последних записей из консоли. |
-| `/screenshot` | Нет | Захват изображения окна редактора (сохраняется в корень проекта). |
-
-### 🆕 Новые возможности (v1.5.0)
-
-1.  **Кэширование типов**: Использование `ConcurrentDictionary` для кэширования результатов поиска типов значительно ускоряет работу `/component` и `/call` при повторных запросах.
-2.  **Детальная информация об ассетах**: Новый эндпоинт `/asset_info` позволяет получить GUID, зависимости и размер любого файла в проекте.
-3.  **Улучшенная обработка ошибок**: Сервер теперь возвращает соответствующие HTTP статус-коды:
-    *   `400 Bad Request` — если пропущены обязательные параметры или они неверны.
-    *   `404 Not Found` — если объект или ассет не найден.
-    *   `500 Internal Server Error` — при возникновении исключений в коде Unity.
-    *   `504 Gateway Timeout` — если основной поток Unity занят и не ответил за 15 секунд.
+| `/asset` | `action, path, id, shader, name, from, to, type` | `create_material`, `apply_material`, `rename`, `move`, `find_by_type`. |
+| `/asset_info` | `path` | GUID, тип, размер и список зависимостей ассета. |
+| `/prefab` | `action, id, path` | `load` (инстанс), `save` (создать префаб), `unpack`. |
+| `/editor` | `action, type, msg, pos, rot` | `window_open`, `notification`, `set_view` (управление камерой редактора). |
+| `/selection` | `action, ids` | Геттер/сеттер выделенных объектов. |
+| `/logs` | `count, filter` | Последние записи из Console (поддерживает фильтрацию). |
+| `/diagnostics` | Нет | Поиск объектов с битыми ссылками на скрипты (Missing Script). |
+| `/system` | Нет | Спецификации железа (CPU, GPU, VRAM, OS). |
+| `/batch` | JSON body | Список команд для атомарного выполнения. |
+| `/undo` / `/redo` | Нет | Отмена и повтор действий в редакторе. |
 
 ## ⚙️ Технические детали
-- **Порт**: 12121 (локально).
-- **Зависимости**: Newtonsoft.Json (стандарт для Unity).
-- **Безопасность**: Сервер слушает только `localhost`. Все операции выполняются в главном потоке Unity.
-- **Производительность**: Оптимизированный поиск типов и использование `SerializedObject` для эффективного доступа к данным.
+- **Безопасность**: Принимает запросы только с `localhost`.
+- **Потокобезопасность**: Все команды Unity API выполняются строго в главном потоке (Main Thread) через очередь.
+- **Undo System**: Почти все операции (`modify`, `create`, `component`) поддерживают стандартный Ctrl+Z.
+- **Версия**: API v3.0 (Marketing), Package v1.4.0.

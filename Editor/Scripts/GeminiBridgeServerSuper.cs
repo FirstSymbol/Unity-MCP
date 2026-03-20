@@ -185,17 +185,39 @@ namespace GeminiBridge.Editor
 
         private static object ProcessPath(string path, HttpListenerRequest request, string body = null)
         {
+            if (path == "/batch") return HandleBatch(body);
+
             var bodyParams = string.IsNullOrEmpty(body) ? new Dictionary<string, string>() : 
                 JsonConvert.DeserializeObject<Dictionary<string, string>>(body) ?? new Dictionary<string, string>();
 
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            return ProcessCommand(path, request, bodyParams);
+        }
+
+        private static object HandleBatch(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return new { error = "Batch body required" };
+            try {
+                var commands = JsonConvert.DeserializeObject<List<BatchCommand>>(body);
+                var results = new List<object>();
+                foreach (var cmd in commands) {
+                    results.Add(ProcessCommand(cmd.path, null, cmd.parameters));
+                }
+                return results;
+            } catch (Exception e) { return new { error = "Invalid batch JSON: " + e.Message }; }
+        }
+
+        private class BatchCommand { public string path; public Dictionary<string, string> parameters; }
+
+        private static object ProcessCommand(string path, HttpListenerRequest request, Dictionary<string, string> bodyParams)
+        {
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
 
             switch (path)
             {
                 case "/ping":
                     return new { 
                         status = "ok", 
-                        version = "1.5.0", 
+                        version = "3.0.0", 
                         project = Application.productName, 
                         platform = Application.platform.ToString(),
                         unityVersion = Application.unityVersion
@@ -243,13 +265,17 @@ namespace GeminiBridge.Editor
 
                 case "/logs":
                     int count = 10; int.TryParse(GetParam("count"), out count);
-                    return GetLogs(count);
+                    string filter = GetParam("filter");
+                    return GetLogs(count, filter);
 
                 case "/diagnostics":
                     return RunDiagnostics();
 
                 case "/screenshot":
                     return CaptureScreenshot();
+
+                case "/screenshot_base64":
+                    return CaptureScreenshotBase64();
 
                 case "/component":
                     return HandleComponent(request, bodyParams);
@@ -275,8 +301,146 @@ namespace GeminiBridge.Editor
                 case "/editor":
                     return HandleEditor(request, bodyParams);
 
+                case "/physics/raycast":
+                    return HandlePhysics(request, bodyParams);
+
+                case "/upm/list":
+                    return ListPackages();
+
+                case "/filesystem/read":
+                    return ReadAssetContent(GetParam("path"));
+
+                case "/filesystem/create_script":
+                    return CreateScript(GetParam("path"), GetParam("content"));
+
+                case "/undo": Undo.PerformUndo(); return new { status = "Undo performed" };
+                case "/redo": Undo.PerformRedo(); return new { status = "Redo performed" };
+
+                case "/project_settings":
+                    return new {
+                        productName = PlayerSettings.productName,
+                        companyName = PlayerSettings.companyName,
+                        bundleVersion = PlayerSettings.bundleVersion,
+                        applicationIdentifier = PlayerSettings.GetApplicationIdentifier(BuildTargetGroup.Standalone),
+                        scriptingBackend = PlayerSettings.GetScriptingBackend(BuildTargetGroup.Standalone).ToString(),
+                        apiCompatibility = PlayerSettings.GetApiCompatibilityLevel(BuildTargetGroup.Standalone).ToString()
+                    };
+
+                case "/build_settings":
+                    return new {
+                        activeBuildTarget = EditorUserBuildSettings.activeBuildTarget.ToString(),
+                        selectedBuildTargetGroup = EditorUserBuildSettings.selectedBuildTargetGroup.ToString(),
+                        scenes = EditorBuildSettings.scenes.Select(s => new { s.path, s.enabled }).ToList()
+                    };
+
+                case "/search_components":
+                    string sType = GetParam("type");
+                    if (string.IsNullOrEmpty(sType)) return new { error = "Type required" };
+                    var compType = FindType(sType);
+                    if (compType == null) return new { error = "Type not found" };
+                    var allObjs = UnityEngine.Object.FindObjectsOfType(compType);
+                    return allObjs.Select(o => {
+                        var go = (o as Component)?.gameObject ?? (o as GameObject);
+                        return new { id = go?.GetInstanceID(), name = go?.name, type = o.GetType().Name };
+                    }).ToList();
+
                 default:
                     return new { error = $"Unknown path: {path}" };
+            }
+        }
+
+        private static object HandlePhysics(HttpListenerRequest request, Dictionary<string, string> bodyParams)
+        {
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            if (!TryParseVector3(GetParam("origin"), out Vector3 origin)) return new { error = "Origin required" };
+            if (!TryParseVector3(GetParam("direction"), out Vector3 direction)) return new { error = "Direction required" };
+            float dist = float.TryParse(GetParam("distance"), out float d) ? d : 1000f;
+
+            if (Physics.Raycast(origin, direction, out RaycastHit hit, dist))
+            {
+                return new {
+                    hit = true,
+                    id = hit.collider.gameObject.GetInstanceID(),
+                    name = hit.collider.gameObject.name,
+                    point = hit.point,
+                    normal = hit.normal,
+                    distance = hit.distance
+                };
+            }
+            return new { hit = false };
+        }
+
+        private static object ListPackages()
+        {
+            try {
+                var method = typeof(UnityEditor.PackageManager.Client).GetMethod("List", BindingFlags.Public | BindingFlags.Static, null, new Type[] { typeof(bool), typeof(bool) }, null);
+                if (method == null) return new { error = "Package Manager List method not found" };
+                // This is asynchronous and complicated to wait for in this simple bridge.
+                // For now, let's use the internal static list if accessible or a simplified reflection.
+                return new { info = "UPM listing requires asynchronous handling. Use /filesystem/read on Packages/manifest.json for raw data." };
+            } catch (Exception e) { return new { error = e.Message }; }
+        }
+
+        private static object ReadAssetContent(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return new { error = "Path required" };
+            string fullPath = Path.GetFullPath(path);
+            if (!File.Exists(fullPath)) return new { error = "File not found" };
+            try { return new { content = File.ReadAllText(fullPath) }; }
+            catch (Exception e) { return new { error = e.Message }; }
+        }
+
+        private static object CreateScript(string path, string content)
+        {
+            if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(content)) return new { error = "Path and Content required" };
+            try {
+                string dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(path, content);
+                AssetDatabase.ImportAsset(path);
+                return new { status = "Script created", path = path };
+            } catch (Exception e) { return new { error = e.Message }; }
+        }
+
+        private static object CaptureScreenshotBase64()
+        {
+            try
+            {
+                var view = SceneView.lastActiveSceneView;
+                if (view == null) return new { error = "No active Scene View found" };
+
+                int width = (int)view.position.width;
+                int height = (int)view.position.height;
+
+                var rt = new RenderTexture(width, height, 24);
+                var screenShot = new Texture2D(width, height, TextureFormat.RGB24, false);
+
+                var cam = view.camera;
+                var oldTarget = cam.targetTexture;
+                cam.targetTexture = rt;
+                cam.Render();
+
+                RenderTexture.active = rt;
+                screenShot.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+                cam.targetTexture = oldTarget;
+                RenderTexture.active = null;
+
+                byte[] bytes = screenShot.EncodeToPNG();
+                
+                // Cleanup
+                UnityEngine.Object.DestroyImmediate(rt);
+                UnityEngine.Object.DestroyImmediate(screenShot);
+
+                return new { 
+                    status = "Captured", 
+                    width, 
+                    height,
+                    base64 = Convert.ToBase64String(bytes) 
+                };
+            }
+            catch (Exception e)
+            {
+                return new { error = "Screenshot failed: " + e.Message };
             }
         }
 
@@ -304,65 +468,60 @@ namespace GeminiBridge.Editor
 
         private static object HandleComponent(HttpListenerRequest request, Dictionary<string, string> bodyParams)
         {
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
             
             if (!int.TryParse(GetParam("id"), out int id)) return new { error = "ID required" };
-            var go = EditorUtility.InstanceIDToObject(id) as GameObject;
-            if (go == null) return new { error = "Object not found" };
+            var obj = EditorUtility.InstanceIDToObject(id);
+            if (obj == null) return new { error = "Object not found" };
 
             string action = GetParam("action");
             string typeName = GetParam("type");
             string propName = GetParam("name");
             string value = GetParam("value");
 
+            object target = obj;
+            if (obj is GameObject go && !string.IsNullOrEmpty(typeName))
+            {
+                var t = FindType(typeName);
+                if (t == null) return new { error = "Type not found" };
+                target = go.GetComponent(t);
+                if (target == null && action != "add") return new { error = "Component not found on object" };
+            }
+
             switch (action)
             {
                 case "add":
-                    var t = FindType(typeName);
-                    if (t == null) return new { error = "Type not found" };
-                    var comp = Undo.AddComponent(go, t);
-                    return new { status = "Added", type = t.FullName };
+                    if (obj is GameObject goAdd) {
+                        var tAdd = FindType(typeName);
+                        if (tAdd == null) return new { error = "Type not found" };
+                        Undo.AddComponent(goAdd, tAdd);
+                        return new { status = "Added" };
+                    }
+                    return new { error = "Can only add components to GameObjects" };
 
                 case "remove":
-                    var tRem = FindType(typeName);
-                    if (tRem == null) return new { error = "Type not found" };
-                    var cRem = go.GetComponent(tRem);
-                    if (cRem == null) return new { error = "Component not found on object" };
-                    Undo.DestroyObjectImmediate(cRem);
-                    return new { status = "Removed" };
+                    if (target is Component cRem) { Undo.DestroyObjectImmediate(cRem); return new { status = "Removed" }; }
+                    return new { error = "Target is not a component" };
 
                 case "set":
-                    var tSet = FindType(typeName);
-                    if (tSet == null) return new { error = "Type not found" };
-                    var cSet = go.GetComponent(tSet);
-                    if (cSet == null) return new { error = "Component not found" };
-                    if (SetPropertyValue(cSet, propName, value))
-                    {
-                        EditorUtility.SetDirty(cSet);
+                    if (SetPropertyValue(target, propName, value)) {
+                        EditorUtility.SetDirty((UnityEngine.Object)target);
                         return new { status = "OK", value = value };
                     }
                     return new { error = $"Failed to set property {propName}" };
 
                 case "get":
-                    var tGet = FindType(typeName);
-                    if (tGet == null) return new { error = "Type not found" };
-                    var cGet = go.GetComponent(tGet);
-                    if (cGet == null) return new { error = "Component not found" };
-                    return new { value = GetPropertyValue(cGet, propName) };
+                    return new { value = GetPropertyValue(target, propName) };
 
                 case "invoke":
-                    var tInv = FindType(typeName);
-                    if (tInv == null) return new { error = "Type not found" };
-                    var cInv = go.GetComponent(tInv);
-                    if (cInv == null) return new { error = "Component not found" };
-                    return InvokeMethod(cInv, GetParam("method"), GetParam("args"));
+                    return InvokeMethod(target, GetParam("method"), GetParam("args"));
             }
             return new { error = "Invalid component action" };
         }
 
         private static object HandleScene(HttpListenerRequest request, Dictionary<string, string> bodyParams)
         {
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
             string action = GetParam("action");
             switch (action)
             {
@@ -413,7 +572,7 @@ namespace GeminiBridge.Editor
 
         private static object HandleSelection(HttpListenerRequest request, Dictionary<string, string> bodyParams)
         {
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
             string action = GetParam("action");
             switch (action)
             {
@@ -433,7 +592,7 @@ namespace GeminiBridge.Editor
 
         private static object HandleAsset(HttpListenerRequest request, Dictionary<string, string> bodyParams)
         {
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
             string action = GetParam("action");
             switch (action)
             {
@@ -485,7 +644,7 @@ namespace GeminiBridge.Editor
 
         private static object HandleTransform(HttpListenerRequest request, Dictionary<string, string> bodyParams)
         {
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
             if (!int.TryParse(GetParam("id"), out int id)) return new { error = "ID required" };
             var go = EditorUtility.InstanceIDToObject(id) as GameObject;
             if (go == null) return new { error = "Not found" };
@@ -520,7 +679,7 @@ namespace GeminiBridge.Editor
 
         private static object HandlePrefab(HttpListenerRequest request, Dictionary<string, string> bodyParams)
         {
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
             string action = GetParam("action");
             string path = GetParam("path");
 
@@ -554,7 +713,7 @@ namespace GeminiBridge.Editor
 
         private static object HandleEditor(HttpListenerRequest request, Dictionary<string, string> bodyParams)
         {
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
             string action = GetParam("action");
             switch (action)
             {
@@ -571,6 +730,11 @@ namespace GeminiBridge.Editor
                     if (TryParseVector3(GetParam("rot"), out Vector3 rot)) SceneView.lastActiveSceneView.rotation = Quaternion.Euler(rot);
                     SceneView.lastActiveSceneView.Repaint();
                     return new { status = "View updated" };
+                case "layout_save":
+                    string lPath = GetParam("path");
+                    if (string.IsNullOrEmpty(lPath)) return new { error = "Path required" };
+                    EditorUtility.DisplayDialog("Bridge", "Manual layout management required via Unity menu.", "OK");
+                    return new { status = "Action required" };
             }
             return new { error = "Invalid editor action" };
         }
@@ -597,47 +761,64 @@ namespace GeminiBridge.Editor
         private static object GetPropertyValue(object target, string memberName)
         {
             if (target == null || string.IsNullOrEmpty(memberName)) return null;
-            var type = target.GetType();
-            var field = type.GetField(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            var prop = type.GetProperty(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            return field?.GetValue(target) ?? prop?.GetValue(target, null);
+            
+            object currentTarget = target;
+            string[] parts = memberName.Split('.');
+            
+            foreach (var part in parts)
+            {
+                if (currentTarget == null) return null;
+                var type = currentTarget.GetType();
+                var field = type.GetField(part, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+                var prop = type.GetProperty(part, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+                currentTarget = field?.GetValue(currentTarget) ?? prop?.GetValue(currentTarget, null);
+            }
+            
+            return currentTarget;
         }
 
         private static bool SetPropertyValue(object target, string memberName, string value)
         {
             if (target == null || string.IsNullOrEmpty(memberName)) return false;
             
-            Type type = target.GetType();
-            FieldInfo field = null;
-            PropertyInfo prop = null;
+            object currentTarget = target;
+            string[] parts = memberName.Split('.');
+            List<object> targetsStack = new List<object> { target };
 
-            while (type != null)
+            for (int i = 0; i < parts.Length - 1; i++)
             {
-                field = type.GetField(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
-                if (field != null) break;
-
-                prop = type.GetProperty(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
-                if (prop != null) break;
-
-                type = type.BaseType;
+                var type = currentTarget.GetType();
+                var field = type.GetField(parts[i], BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+                var prop = type.GetProperty(parts[i], BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+                currentTarget = field?.GetValue(currentTarget) ?? prop?.GetValue(currentTarget, null);
+                if (currentTarget == null) return false;
+                targetsStack.Add(currentTarget);
             }
-            
-            Type memberType = field?.FieldType ?? prop?.PropertyType;
-            if (memberType == null) return false;
 
+            string finalMember = parts[parts.Length - 1];
+            Type finalTargetType = currentTarget.GetType();
+            var finalField = finalTargetType.GetField(finalMember, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+            var finalProp = finalTargetType.GetProperty(finalMember, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+
+            if (finalField == null && finalProp == null) return false;
+
+            Type memberType = finalField?.FieldType ?? finalProp?.PropertyType;
             object val = ParseValue(value, memberType);
             if (val == null && memberType != typeof(string)) return false;
 
-            if (field != null) { Undo.RecordObject((UnityEngine.Object)target, "Set field"); field.SetValue(target, val); }
-            else { Undo.RecordObject((UnityEngine.Object)target, "Set property"); prop.SetValue(target, val, null); }
+            Undo.RecordObject((UnityEngine.Object)target, "Set " + memberName);
+            
+            if (finalField != null) finalField.SetValue(currentTarget, val);
+            else finalProp.SetValue(currentTarget, val, null);
+            
             return true;
         }
 
         private static object InvokeMethod(object target, string methodName, string argsJson)
         {
             if (target == null || string.IsNullOrEmpty(methodName)) return new { error = "Invalid target or method" };
-            var method = target.GetType().GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (method == null) return new { error = "Method not found" };
+            var method = target.GetType().GetMethod(methodName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy);
+            if (method == null) return new { error = "Method not found: " + methodName + " on " + target.GetType().Name };
 
             object[] args = null;
             if (!string.IsNullOrEmpty(argsJson))
@@ -662,7 +843,7 @@ namespace GeminiBridge.Editor
             if (targetType == typeof(bool)) return value.ToLower() == "true";
             
             // Handle JSON objects for Vector/Color
-            if (value.Trim().StartsWith("{"))
+            if (value != null && value.Trim().StartsWith("{"))
             {
                 try { return JsonConvert.DeserializeObject(value, targetType); } catch { }
             }
@@ -771,13 +952,20 @@ namespace GeminiBridge.Editor
         {
             return AssetDatabase.FindAssets(filter)
                 .Select(guid => AssetDatabase.GUIDToAssetPath(guid))
-                .Select(path => new { path, type = AssetDatabase.GetMainAssetTypeAtPath(path)?.Name })
+                .Select(path => {
+                    var obj = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(path);
+                    return new { 
+                        id = obj?.GetInstanceID(),
+                        path, 
+                        type = obj?.GetType().Name 
+                    };
+                })
                 .ToList();
         }
 
         private static object ModifyObject(HttpListenerRequest request, Dictionary<string, string> bodyParams)
         {
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
             if (!int.TryParse(GetParam("id"), out int id)) return new { error = "ID required" };
             var go = EditorUtility.InstanceIDToObject(id) as GameObject;
             if (go == null) return new { error = "Not found" };
@@ -803,7 +991,7 @@ namespace GeminiBridge.Editor
 
         private static object CreateObject(HttpListenerRequest request, Dictionary<string, string> bodyParams)
         {
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
             string type = GetParam("type") ?? "empty";
             GameObject go = type.ToLower() switch {
                 "cube" => GameObject.CreatePrimitive(PrimitiveType.Cube),
@@ -839,7 +1027,7 @@ namespace GeminiBridge.Editor
             } catch (Exception e) { return new { error = e.Message }; }
         }
 
-        private static object GetLogs(int count)
+        private static object GetLogs(int count, string filter = null)
         {
             try {
                 var assembly = typeof(EditorWindow).Assembly;
@@ -847,11 +1035,9 @@ namespace GeminiBridge.Editor
                 if (type == null) return new { error = "LogEntries type not found" };
 
                 var getCountMethod = type.GetMethod("GetCount");
-                if (getCountMethod == null) return new { error = "GetCount method not found" };
                 int total = (int)getCountMethod.Invoke(null, null);
 
                 var entryType = assembly.GetType("UnityEditor.LogEntry");
-                if (entryType == null) return new { error = "LogEntry type not found" };
                 var entry = Activator.CreateInstance(entryType);
                 var getter = type.GetMethod("GetEntryInternal");
                 
@@ -861,8 +1047,11 @@ namespace GeminiBridge.Editor
 
                 for (int i = Mathf.Max(0, total - count); i < total; i++) {
                     getter.Invoke(null, new[] { i, entry });
+                    string msg = conditionField?.GetValue(entry)?.ToString();
+                    if (!string.IsNullOrEmpty(filter) && !msg.Contains(filter)) continue;
+
                     results.Add(new { 
-                        msg = conditionField?.GetValue(entry),
+                        msg = msg,
                         type = modeField?.GetValue(entry)?.ToString()
                     });
                 }
@@ -884,7 +1073,7 @@ namespace GeminiBridge.Editor
 
         private static object ExecuteCommand(string cmd, HttpListenerRequest request, Dictionary<string, string> bodyParams)
         {
-            string GetParam(string name) => request.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
+            string GetParam(string name) => request?.QueryString[name] ?? (bodyParams.TryGetValue(name, out var val) ? val : null);
             switch (cmd?.ToLower()) {
                 case "play": EditorApplication.isPlaying = true; break;
                 case "stop": EditorApplication.isPlaying = false; break;

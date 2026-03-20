@@ -1,7 +1,7 @@
 {
   "name": "com.gemini.unitybridge",
   "displayName": "Gemini Unity Bridge",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "Bridge for communication between Gemini CLI and Unity Editor.",
   "author": {
     "name": "Gemini CLI"

@@ -271,6 +271,9 @@ namespace GeminiBridge.Editor
                 case "/diagnostics":
                     return RunDiagnostics();
 
+                case "/setup_test":
+                    return SetupTestShapes();
+
                 case "/screenshot":
                     return CaptureScreenshot();
 
@@ -842,8 +845,8 @@ namespace GeminiBridge.Editor
             if (targetType == typeof(double)) return double.TryParse(value, out double d) ? d : 0.0;
             if (targetType == typeof(bool)) return value.ToLower() == "true";
             
-            // Handle JSON objects for Vector/Color
-            if (value != null && value.Trim().StartsWith("{"))
+            // Handle JSON objects or arrays for Vector/Color/Lists
+            if (value != null && (value.Trim().StartsWith("{") || value.Trim().StartsWith("[")))
             {
                 try { return JsonConvert.DeserializeObject(value, targetType); } catch { }
             }
@@ -1099,6 +1102,36 @@ namespace GeminiBridge.Editor
                 path = Path.GetFullPath(path),
                 info = "Screenshot saved to project root. For direct base64, use a separate specialized endpoint if implemented via RenderTexture."
             };
+        }
+
+        private static object SetupTestShapes()
+        {
+            try {
+                // Metaballs: Base(-17690) + Operator(-17710)
+                var mBase = EditorUtility.InstanceIDToObject(-17690) as GameObject;
+                var mOp = EditorUtility.InstanceIDToObject(-17710) as GameObject;
+                if (mBase != null && mOp != null) {
+                    var b = mBase.GetComponent<ProceduralShapes.Runtime.ProceduralShape>();
+                    var o = mOp.GetComponent<ProceduralShapes.Runtime.ProceduralShape>();
+                    b.BooleanOperations = new List<ProceduralShapes.Runtime.BooleanInput> {
+                        new ProceduralShapes.Runtime.BooleanInput { Operation = ProceduralShapes.Runtime.BooleanOperation.Union, SourceShape = o, Smoothness = 40f }
+                    };
+                    b.SetAllDirty();
+                }
+
+                // CSG Rectangle: Base(-17648) + Cutter(-17668)
+                var rBase = EditorUtility.InstanceIDToObject(-17648) as GameObject;
+                var rCut = EditorUtility.InstanceIDToObject(-17668) as GameObject;
+                if (rBase != null && rCut != null) {
+                    var rb = rBase.GetComponent<ProceduralShapes.Runtime.ProceduralShape>();
+                    var rc = rCut.GetComponent<ProceduralShapes.Runtime.ProceduralShape>();
+                    rb.BooleanOperations = new List<ProceduralShapes.Runtime.BooleanInput> {
+                        new ProceduralShapes.Runtime.BooleanInput { Operation = ProceduralShapes.Runtime.BooleanOperation.Subtraction, SourceShape = rc, Smoothness = 5f }
+                    };
+                    rb.SetAllDirty();
+                }
+                return new { status = "Test shapes setup complete" };
+            } catch (Exception e) { return new { error = e.Message }; }
         }
 
         private static bool TryParseVector3(string s, out Vector3 v)

@@ -2,7 +2,9 @@
     "name": "GeminiUnityBridge.Editor",
     "rootNamespace": "GeminiBridge.Editor",
     "references": [
-        "GeminiUnityBridge.Runtime"
+        "GeminiUnityBridge.Runtime",
+        "Unity.Newtonsoft.Json",
+        "ProceduralShape"
     ],
     "includePlatforms": [
         "Editor"
